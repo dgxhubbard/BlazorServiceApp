@@ -44,7 +44,7 @@ namespace GenerateCert
 			X500DistinguishedName distinguishedName = new X500DistinguishedName ( $"CN={certificateName}" );
 
 
-			var issuedTo = "GAGEtrak Web API Server";
+			var issuedTo = "Blazor App Service";
 
 			using ( RSA rsa = new RSACryptoServiceProvider ( 2048 * 2, new CspParameters ( 24, issuedBy, issuedTo ) ) )
 			{
