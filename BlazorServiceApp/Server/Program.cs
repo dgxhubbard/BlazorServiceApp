@@ -5,9 +5,12 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Security.Authentication;
+
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using System.Web;
+using System.Web.Mvc;
 
 
 using Microsoft.AspNetCore.Builder;
@@ -35,8 +38,7 @@ using NLog.Config;
 using NLog.Targets;
 using NLog.Targets.Wrappers;
 using NLog.Web;
-
-
+using System.Text;
 
 namespace BlazorServiceApp.Server
 {
@@ -47,6 +49,17 @@ namespace BlazorServiceApp.Server
     //
     public class Program
     {
+        #region Constants
+
+        public const string Url =  "<%Url%>";
+        public const string CertFilename = "<%CertFilename%>";
+        public const string CertPassword = "<%CertPassword%>";
+
+        #endregion
+
+
+
+
         public static void Main ( string [] args )
         {
             var path = Path.GetDirectoryName ( Assembly.GetExecutingAssembly ().Location );
@@ -54,11 +67,19 @@ namespace BlazorServiceApp.Server
 
             var logger = LogManager.Setup ().LoadConfigurationFromFile ( "nlog.config" ).GetCurrentClassLogger ();
 
+            // set url to listen on
+            // using ports.json for port
+            // this is so user can specify port
 
             if ( !Ports.Exists ( path ) )
                 Ports.SavePorts ( path );
             var ports = Ports.LoadPorts ( path );
 
+            var url = "https://localhost"  + ":" + ports.ApiPort;
+
+            // get certificate to use
+            // using certificate.json for info
+            // this so user can use their own certificate
 
             var config = new ConfigurationBuilder ()
                         .SetBasePath ( Directory.GetCurrentDirectory () )
@@ -68,22 +89,77 @@ namespace BlazorServiceApp.Server
                         .Build ();
 
             var certificateSettings = config.GetSection ( "certificateSettings" );
-            string certificateFileName = certificateSettings.GetValue<string> ( "filename" );
+
+            string certificateFilename = certificateSettings.GetValue<string> ( "filename" );
             string certificatePassword = certificateSettings.GetValue<string> ( "password" );
 
-            var certificate = new X509Certificate2 ( certificateFileName, certificatePassword );
 
-            var webApplicationOptions = new WebApplicationOptions ()
+            //var certificate = new X509Certificate2 ( certificateFilename, certificatePassword );
+
+            // replace app settings with url and certificate info
+            var appSettingsCnst =
+                @"
+                    {
+                      ""Logging"": {
+                        ""LogLevel"": {
+                          ""Default"": ""Information"",
+                          ""Microsoft.AspNetCore"": ""Warning""
+                        }
+                      },
+                      ""Kestrel"": {
+                        ""Endpoints"": {
+                          ""HttpsInlineCertFile"": {
+                            ""Url"": ""<%Url%>"",
+                            ""Certificate"": {
+                              ""Path"": ""<%CertFilename%>"",
+                              ""Password"": ""<%CertPassword%>""
+                            }
+                          }
+                        }
+                      },
+                      ""AllowedHosts"": ""*""
+                    }
+                 ";
+
+
+            var bldr = new StringBuilder ( appSettingsCnst );
+
+            bldr.Replace ( Url, url );
+            bldr.Replace ( CertFilename, certificateFilename );
+            bldr.Replace ( CertPassword, certificatePassword );
+
+            var appSettingsPath = Path.Combine ( path, "appsettings.json" );
+            if ( File.Exists ( appSettingsPath ) )
+                File.Delete ( appSettingsPath );
+
+            File.WriteAllText ( Path.Combine ( path, "appsettings.json" ), bldr.ToString () );
+
+
+
+            var builder = WebApplication.CreateBuilder ( new WebApplicationOptions
             {
                 Args = args,
-                ContentRootPath = AppContext.BaseDirectory,
-                ApplicationName = System.Diagnostics.Process.GetCurrentProcess ().ProcessName
-            };
-
-            var builder = WebApplication.CreateBuilder ( webApplicationOptions );
+                ContentRootPath = WindowsServiceHelpers.IsWindowsService () ? AppContext.BaseDirectory : path
+            } );
 
             builder.Host.UseWindowsService ();
 
+            builder.Services.AddWindowsService ( options =>
+            {
+                options.ServiceName = "api";
+            } );
+
+            builder.WebHost.UseKestrel ( ( context, serverOptions ) =>
+            {
+                serverOptions.Configure ( context.Configuration.GetSection ( "Kestrel" ) )
+                .Endpoint ( "HTTPS", listenOptions =>
+                {
+                    listenOptions.HttpsOptions.SslProtocols = SslProtocols.Tls12;
+                } );
+            } );
+
+
+            /*
             builder.WebHost.ConfigureKestrel (
                 serverOptions =>
                 {
@@ -95,7 +171,7 @@ namespace BlazorServiceApp.Server
 
                         } );
 
-                } )
+                } );
                 .UseKestrel (
                     options =>
                     {
@@ -106,7 +182,7 @@ namespace BlazorServiceApp.Server
                         } );
                     } )
                 .UseConfiguration ( config );
-
+            */
 
 
 
@@ -115,11 +191,30 @@ namespace BlazorServiceApp.Server
             builder.Services.AddControllersWithViews ();
             builder.Services.AddRazorPages ();
 
+            /*
+            builder.Services.AddMvc ( options =>
+            {
+                options.SslPort = 7224;
+                options.Filters.Add ( typeof ( RequireHttpsAttribute ) );
+            } );
+            */
+
+            builder.Services.AddAntiforgery (
+                options =>
+                {
+                    options.Cookie.Name = "_af";
+                    options.Cookie.HttpOnly = true;
+                    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                    options.HeaderName = "X-XSRF-TOKEN";
+                }
+            );
+
+
             // NLog: Setup NLog for Dependency injection
             builder.Logging.ClearProviders ();
             builder.Logging.SetMinimumLevel ( Microsoft.Extensions.Logging.LogLevel.Trace );
             builder.Host.UseNLog ();
-            
+
 
             var app = builder.Build ();
 
